@@ -1,0 +1,11 @@
+# Trivy settings, read by every trivy command run from the repository root.
+scan:
+  # GLPI's bundled editor scripts are 11-14 MB each. The secret scanner warns
+  # about their size on every run. File names follow the GLPI release.
+  skip-files:
+    - var/www/glpi/public/lib/22.js
+    - var/www/glpi/public/lib/22.js.map
+    - var/www/glpi/public/lib/monaco.js
+    - var/www/glpi/public/lib/monaco.js.map
+    - var/www/glpi/public/lib/ts.worker.js
+    - var/www/glpi/public/lib/ts.worker.js.map

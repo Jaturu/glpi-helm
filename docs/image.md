@@ -146,7 +146,10 @@ Other build args, rarely changed:
    `PHP_PACKAGES` in the Dockerfile.
 4. `make test-all`: unit, schema and image tests (see
    [Testing](testing.md)).
-5. Commit. CI builds and publishes the image and the chart.
+5. If the Trivy gate warns that a scanned file is too large, update the
+   `skip-files` list in `trivy.yaml`. The names of GLPI's bundled scripts
+   change between releases.
+6. Commit. CI builds and publishes the image and the chart.
 
 ## Publishing and verification
 
