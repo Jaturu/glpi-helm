@@ -1,0 +1,30 @@
+apiVersion: v2
+name: glpi
+description: >-
+  GLPI IT asset management and service desk on a non-root php-fpm image with an
+  nginx-unprivileged sidecar, optional built-in MariaDB (official image), and
+  Gateway API HTTPRoute support.
+type: application
+
+# Chart version (SemVer). Bump on every chart change.
+version: 0.1.0
+
+# GLPI release the chart is built and tested against. The default image
+# tag is this value, and the image build in image/ uses the same version.
+appVersion: "12.0.2"
+
+kubeVersion: ">=1.29.0-0"
+
+home: https://github.com/Jaturu/glpi-helm
+sources:
+  - https://github.com/Jaturu/glpi-helm
+  - https://github.com/glpi-project/glpi
+maintainers:
+  - name: Jaturu
+    url: https://github.com/Jaturu
+keywords:
+  - glpi
+  - itsm
+  - helpdesk
+  - asset-management
+  - inventory

@@ -1,0 +1,14 @@
+# External database, existing secret and claim, no persistence chart objects.
+glpi:
+  url: https://glpi.example.com
+mariadb:
+  enabled: false
+externalDatabase:
+  host: mariadb.databases.svc
+  existingSecret: glpi-db
+persistence:
+  existingClaim: glpi-data
+migrations:
+  enabled: false
+cron:
+  enabled: false

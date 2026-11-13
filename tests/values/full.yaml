@@ -1,0 +1,38 @@
+# Every optional feature on: HTTPRoute + Ingress, proxies, constants, extras.
+glpi:
+  url: https://glpi.example.com
+  defaultLanguage: fr_FR
+  timezone: Europe/Paris
+  trustedProxies: [10.244.0.0/16]
+  uploadLimitMB: 200
+  constants:
+    GLPI_LOG_LVL: info
+    GLPI_MARKETPLACE_ENABLE: 1
+  extraEnv:
+    - name: LDAP_BIND_PASSWORD
+      valueFrom: { secretKeyRef: { name: ldap, key: password } }
+  extraEnvFrom:
+    - secretRef: { name: extra }
+php:
+  extraIni: |
+    memory_limit = 512M
+cron:
+  intervalSeconds: 120
+httpRoute:
+  enabled: true
+  parentRefs: [{ name: gw, namespace: gateway-system, sectionName: https }]
+  hostnames: [glpi.example.com]
+ingress:
+  enabled: true
+  className: nginx
+  annotations: { nginx.ingress.kubernetes.io/proxy-body-size: 205m }
+  hosts: [glpi.example.com]
+  tls: [{ secretName: glpi-tls, hosts: [glpi.example.com] }]
+persistence:
+  storageClass: fast
+mariadb:
+  persistence:
+    storageClass: fast
+imagePullSecrets: [{ name: regcred }]
+nodeSelector: { kubernetes.io/os: linux }
+tolerations: [{ key: dedicated, operator: Exists, effect: NoSchedule }]

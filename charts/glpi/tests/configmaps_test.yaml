@@ -1,0 +1,174 @@
+suite: configmaps (GLPI constants, PHP ini, nginx)
+templates:
+  - configmap-glpi.yaml
+  - configmap-php.yaml
+  - configmap-nginx.yaml
+release:
+  name: desk
+tests:
+  # ------------------------------------------------------ local_define.php
+  - it: renders an empty local_define.php by default
+    template: configmap-glpi.yaml
+    asserts:
+      - equal: { path: metadata.name, value: desk-glpi-config }
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: '^<\?php\n'
+      - notMatchRegex:
+          path: 'data["local_define.php"]'
+          pattern: 'define\('
+
+  - it: defines the proxy constants only when trustedProxies is set
+    template: configmap-glpi.yaml
+    set:
+      glpi.trustedProxies: [10.244.0.0/16, 192.0.2.10]
+    asserts:
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "define\\('GLPI_TRUSTED_REVERSE_PROXIES', json_decode\\('\\[\"10\\.244\\.0\\.0/16\",\"192\\.0\\.2\\.10\"\\]', true\\)\\);"
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "define\\('GLPI_REVERSE_PROXY_HEADERS', json_decode\\('\\[\"X-Forwarded-For\",\"X-Forwarded-Proto\"\\]', true\\)\\);"
+
+  - it: renders glpi.constants of every scalar type and lists
+    template: configmap-glpi.yaml
+    set:
+      glpi.constants:
+        GLPI_LOG_LVL: info
+        GLPI_MARKETPLACE_ENABLE: 1
+        GLPI_SYSTEM_CRON: true
+        GLPI_SERVERSIDE_URL_ALLOWED_PRIVATE_NETWORKS_CONTEXTS: [Agent, Auth]
+    asserts:
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "define\\('GLPI_LOG_LVL', json_decode\\('\"info\"', true\\)\\);"
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "define\\('GLPI_MARKETPLACE_ENABLE', json_decode\\('1', true\\)\\);"
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "define\\('GLPI_SYSTEM_CRON', json_decode\\('true', true\\)\\);"
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "json_decode\\('\\[\"Agent\",\"Auth\"\\]', true\\)"
+
+  - it: escapes quotes and backslashes for the PHP single-quoted string
+    template: configmap-glpi.yaml
+    set:
+      glpi.constants:
+        GLPI_USER_AGENT_EXTRA_COMMENTS: it's a \ test
+    asserts:
+      - matchRegex:
+          path: 'data["local_define.php"]'
+          pattern: "json_decode\\('\"it\\\\'s a \\\\\\\\\\\\\\\\ test\"', true\\)"
+
+  # ------------------------------------------------------------- PHP ini
+  - it: derives PHP upload limits from uploadLimitMB
+    template: configmap-php.yaml
+    set:
+      glpi.uploadLimitMB: 200
+    asserts:
+      - equal: { path: metadata.name, value: desk-glpi-php }
+      - matchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: '(?m)^upload_max_filesize = 200M$'
+      - matchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: '(?m)^post_max_size\s+= 205M$'
+      - notMatchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: 'php.extraIni'
+
+  - it: sets the timezone
+    template: configmap-php.yaml
+    set:
+      glpi.timezone: America/New_York
+    asserts:
+      - matchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: '(?m)^date\.timezone\s+= America/New_York$'
+
+  - it: marks the session cookie Secure only for an https URL
+    template: configmap-php.yaml
+    set:
+      glpi.url: https://desk.example.com
+    asserts:
+      - matchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: '(?m)^session\.cookie_secure = On$'
+
+  - it: leaves the session cookie alone for http or no URL
+    template: configmap-php.yaml
+    set:
+      glpi.url: http://desk.example.com
+    asserts:
+      - notMatchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: 'cookie_secure'
+
+  - it: appends php.extraIni after the derived settings
+    template: configmap-php.yaml
+    set:
+      php.extraIni: |
+        memory_limit = 512M
+        max_execution_time = 300
+    asserts:
+      - matchRegex:
+          path: 'data["zz-chart.ini"]'
+          pattern: '(?s)post_max_size.*; php\.extraIni\nmemory_limit = 512M\nmax_execution_time = 300'
+
+  # --------------------------------------------------------------- nginx
+  - it: derives client_max_body_size from uploadLimitMB
+    template: configmap-nginx.yaml
+    set:
+      glpi.uploadLimitMB: 200
+    asserts:
+      - equal: { path: metadata.name, value: desk-glpi-nginx }
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'client_max_body_size 205m;'
+
+  - it: listens on the app and health ports
+    template: configmap-nginx.yaml
+    set:
+      nginx.port: 9080
+      probes.healthPort: 9081
+    asserts:
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: '(?s)listen 9080;.*listen 9081;'
+
+  - it: serves public/ and sends everything else to the front controller
+    template: configmap-nginx.yaml
+    asserts:
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'root /var/www/glpi/public;'
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'try_files \$uri /index\.php\$is_args\$args;'
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'location = /index\.php \{'
+      # GLPI routes /front/*.php through index.php, so other .php paths
+      # must not be blocked, and fastcgi_pass appears once per server.
+      - notMatchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'return 404; \}\s+location ~ /'
+
+  - it: denies dotfiles but leaves /.well-known/ to GLPI
+    template: configmap-nginx.yaml
+    asserts:
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'location ~ /\\\.\(\?!well-known/\) \{ deny all; \}'
+
+  - it: serves /fpm-ping only on the health server
+    template: configmap-nginx.yaml
+    asserts:
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: '(?s)listen 8081;.*location = /fpm-ping'
+      - notMatchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'fpm-status'

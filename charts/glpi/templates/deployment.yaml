@@ -1,0 +1,227 @@
+{{- include "glpi.validate" . }}
+{{- $fullname := include "glpi.fullname" . }}
+{{- $appImage := include "glpi.imageRef" (dict "image" .Values.image "default" .Chart.AppVersion) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "glpi.labels" (dict "ctx" $ "component" "app") | nindent 4 }}
+spec:
+  replicas: 1
+  # RWO volume: the old pod must release it before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "glpi.selectorLabels" (dict "ctx" $ "component" "app") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "glpi.podLabels" (dict "ctx" $ "component" "app") | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-glpi.yaml") . | sha256sum }}
+        checksum/nginx: {{ include (print $.Template.BasePath "/configmap-nginx.yaml") . | sha256sum }}
+        checksum/php: {{ include (print $.Template.BasePath "/configmap-php.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      initContainers:
+        # Prepare writable paths under a read-only root filesystem:
+        #  - public/ assets -> emptyDir served by nginx
+        #  - the four data directories on the volume. GLPI creates what it
+        #    needs below them. mkdir -p leaves existing data untouched.
+        # cp -R, not -a: the volume root is a root-owned mount point, so a
+        # non-root cp cannot preserve timestamps/ownership on it.
+        - name: copy-assets
+          image: {{ $appImage }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - >-
+              cp -R /var/www/glpi/public/. /public/ &&
+              mkdir -p /var/glpi/config /var/glpi/files /var/glpi/logs /var/glpi/marketplace
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.app | nindent 12 }}
+          volumeMounts:
+            - { name: public, mountPath: /public }
+            - { name: data, mountPath: /var/glpi }
+        {{- if .Values.migrations.enabled }}
+        {{- with .Values.migrations.waitForDatabase }}
+        {{- if .enabled }}
+        # Block until the database accepts a login. On a first install MariaDB
+        # spends a minute initialising. Without this, migrate fails and the
+        # pod restarts until it is ready. Bad credentials fail at once.
+        - name: wait-for-database
+          image: {{ $appImage }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command:
+            - php
+            - -r
+            - |
+              {{- $.Files.Get "files/wait-for-database.php" | trimPrefix "<?php\n" | nindent 14 }}
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.resources.app | nindent 12 }}
+          env:
+            {{- include "glpi.dbEnv" $ | nindent 12 }}
+            - name: WAIT_TIMEOUT
+              value: {{ .timeoutSeconds | int | quote }}
+        {{- end }}
+        {{- end }}
+        # Install GLPI into an empty database or update an existing one, and
+        # write config_db.php, before php-fpm starts.
+        - name: migrate
+          image: {{ $appImage }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              {{- .Files.Get "files/migrate.sh" | nindent 14 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.app | nindent 12 }}
+          {{- $migrateEnv := concat (include "glpi.dbEnv" . | fromYamlArray) (list
+                (dict "name" "GLPI_DEFAULT_LANGUAGE" "value" .Values.glpi.defaultLanguage)
+                (dict "name" "GLPI_URL" "value" .Values.glpi.url)) }}
+          {{- include "glpi.appEnv" (dict "ctx" $ "env" $migrateEnv) | nindent 10 }}
+          {{- include "glpi.appMounts" . | nindent 10 }}
+        {{- end }}
+
+      containers:
+        - name: glpi
+          image: {{ $appImage }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.app | nindent 12 }}
+          {{- include "glpi.appEnv" (dict "ctx" $) | nindent 10 }}
+          {{- include "glpi.appMounts" . | nindent 10 }}
+          # php-fpm has no network listener outside the pod. Liveness reaches
+          # it through nginx's health server (same network namespace).
+          livenessProbe:
+            httpGet:
+              path: /fpm-ping
+              # Numeric: named ports resolve only within the probing container,
+              # and "health" is declared on the nginx container.
+              port: {{ .Values.probes.healthPort }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+
+        - name: nginx
+          image: {{ include "glpi.imageRef" (dict "image" .Values.nginx.image "default" "") }}
+          imagePullPolicy: {{ .Values.nginx.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.nginx | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.nginx.port }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.probes.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          # Ready once nginx can reach php-fpm. The health port keeps probes
+          # out of GLPI, which would start a session for every request.
+          readinessProbe:
+            httpGet:
+              path: /fpm-ping
+              port: health
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          volumeMounts:
+            - { name: public, mountPath: /var/www/glpi/public, readOnly: true }
+            - { name: nginx-conf, mountPath: /etc/nginx/conf.d, readOnly: true }
+            - { name: nginx-tmp, mountPath: /tmp }
+
+        {{- if .Values.cron.enabled }}
+        # GLPI's automatic actions. The trap lets the loop stop at once on
+        # SIGTERM instead of waiting out the termination grace period.
+        - name: cron
+          image: {{ $appImage }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              trap 'exit 0' TERM INT
+              while :; do
+                php front/cron.php || echo "cron run failed (exit $?)" >&2
+                sleep "$CRON_INTERVAL" & wait $!
+              done
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.cron | nindent 12 }}
+          {{- $cronEnv := list (dict "name" "CRON_INTERVAL" "value" (.Values.cron.intervalSeconds | int | toString)) }}
+          {{- include "glpi.appEnv" (dict "ctx" $ "env" $cronEnv) | nindent 10 }}
+          {{- include "glpi.appMounts" . | nindent 10 }}
+        {{- end }}
+
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "glpi.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: public
+          emptyDir: {}
+        - name: app-tmp
+          emptyDir: {}
+        - name: nginx-tmp
+          emptyDir: {}
+        - name: nginx-conf
+          configMap:
+            name: {{ $fullname }}-nginx
+        - name: php-conf
+          configMap:
+            name: {{ $fullname }}-php
+        - name: glpi-conf
+          configMap:
+            name: {{ $fullname }}-config
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

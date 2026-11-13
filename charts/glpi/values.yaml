@@ -1,0 +1,386 @@
+## GLPI Helm chart: default values.
+## Every key is documented here. Override only what you need.
+
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the full resource name prefix (default: <release>-<chart>).
+fullnameOverride: ""
+
+## =============================================================================
+## Images
+## =============================================================================
+
+## GLPI php-fpm image (built from image/ in this repo).
+image:
+  # -- Image repository.
+  repository: ghcr.io/jaturu/glpi
+  # -- Defaults to the chart's appVersion when empty.
+  tag: ""
+  # -- Optional image digest (sha256:...). When set, takes precedence over tag.
+  digest: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Pull secrets applied to every pod in the release.
+imagePullSecrets: []
+
+## nginx sidecar: serves static assets from public/ and proxies every other
+## request to php-fpm on 127.0.0.1:9000 inside the same pod.
+nginx:
+  image:
+    # -- nginx sidecar image repository.
+    repository: docker.io/nginxinc/nginx-unprivileged
+    # -- nginx sidecar image tag (1.30 = current stable branch).
+    tag: "1.30-alpine"
+    # -- Optional nginx image digest (sha256:...). Takes precedence over tag.
+    digest: ""
+    # -- nginx image pull policy.
+    pullPolicy: IfNotPresent
+  # -- Container port nginx listens on (unprivileged, >1024).
+  port: 8080
+
+## =============================================================================
+## GLPI application
+## =============================================================================
+
+glpi:
+  # -- Public base URL, including scheme, no trailing slash, e.g.
+  # https://glpi.example.com. Written to GLPI's url_base setting on every
+  # start (used for links in notifications). An https URL also marks the
+  # session cookie Secure. Empty leaves url_base as set in the GLPI UI.
+  url: ""
+
+  # -- Default UI language, applied when the database is first installed.
+  defaultLanguage: en_GB
+
+  # -- Upload size limit in MB. Single source for the limits inside the pod:
+  # PHP upload_max_filesize (N M) and post_max_size (N+5 M), and nginx
+  # client_max_body_size (N+5 m). The Gateway / Ingress in front of the pod
+  # must allow at least N+5 MB too. GLPI's own document size limit is set in
+  # its UI (Setup > General > Management).
+  uploadLimitMB: 50
+
+  # -- PHP timezone (date.timezone).
+  timezone: UTC
+
+  # -- Reverse proxies whose forwarding headers GLPI trusts
+  # (GLPI_TRUSTED_REVERSE_PROXIES). A list of IPs or CIDRs. Set this to the
+  # gateway/ingress pod network so GLPI sees the real scheme and client IP.
+  trustedProxies: []
+
+  # -- Headers trusted from those proxies (GLPI_REVERSE_PROXY_HEADERS).
+  reverseProxyHeaders:
+    - X-Forwarded-For
+    - X-Forwarded-Proto
+
+  # -- Additional GLPI constants, rendered into config/local_define.php.
+  # Values may be strings, numbers, booleans or lists. Example:
+  #   GLPI_MARKETPLACE_ENABLE: 1
+  #   GLPI_LOG_LVL: info
+  # The data path constants and the two proxy constants above are set by the
+  # chart and cannot be repeated here.
+  constants: {}
+
+  # -- Extra container env entries (full EnvVar objects, e.g. secretKeyRef),
+  # applied to the php-fpm, cron and migrate containers.
+  extraEnv: []
+
+  # -- Extra envFrom sources (whole Secrets/ConfigMaps), applied likewise.
+  extraEnvFrom: []
+
+## =============================================================================
+## PHP
+## =============================================================================
+
+## The chart renders one ini file (upload limits derived from
+## glpi.uploadLimitMB, the timezone, then php.extraIni) into a ConfigMap
+## mounted at /etc/glpi/php.d. The image scans that directory after its own
+## settings, so these values win.
+php:
+  # -- Extra PHP ini settings, appended after the derived settings.
+  # Do not set upload_max_filesize or post_max_size here, use
+  # glpi.uploadLimitMB. Example:
+  #   memory_limit = 512M
+  extraIni: ""
+
+## =============================================================================
+## Scheduled tasks
+## =============================================================================
+
+## GLPI's automatic actions (notifications, mail collection, cleanups) run
+## from the PHP CLI. A third container in the GLPI pod calls front/cron.php in
+## a loop. It shares the pod's data volume, so no second volume mount is needed.
+cron:
+  # -- Run GLPI's automatic actions in a container of the GLPI pod.
+  enabled: true
+  # -- Seconds between two runs of front/cron.php.
+  intervalSeconds: 60
+
+## =============================================================================
+## Database
+## =============================================================================
+
+## External MySQL 8.0+ / MariaDB 10.11+, used when mariadb.enabled is false.
+externalDatabase:
+  # -- Database hostname. Required when mariadb.enabled=false.
+  host: ""
+  # -- Database port.
+  port: 3306
+  # -- Database name.
+  database: glpi
+  # -- Database user.
+  username: glpi
+  # -- Secret holding the user's password. REQUIRED when mariadb.enabled=false.
+  existingSecret: ""
+  # -- Key in externalDatabase.existingSecret holding the password.
+  passwordKey: password
+
+## Built-in MariaDB (official mariadb image, single-replica StatefulSet).
+mariadb:
+  # -- Deploy MariaDB with the chart. Set false to use externalDatabase.
+  enabled: true
+
+  image:
+    # -- MariaDB image repository (official image).
+    repository: docker.io/library/mariadb
+    # -- 11.8 is the current MariaDB LTS series. The tag follows its patches.
+    tag: "11.8"
+    # -- Optional MariaDB image digest (sha256:...). Takes precedence over tag.
+    digest: ""
+    # -- MariaDB image pull policy.
+    pullPolicy: IfNotPresent
+
+  auth:
+    # -- Database created on first start (MARIADB_DATABASE).
+    database: glpi
+    # -- User created on first start (MARIADB_USER).
+    username: glpi
+    # -- Use an existing Secret for the passwords instead of the chart-managed
+    # one (generated on first install, reused on upgrades, kept on uninstall).
+    existingSecret: ""
+    # -- Key in the MariaDB Secret holding the GLPI user's password.
+    passwordKey: mariadb-password
+    # -- Key in the MariaDB Secret holding the root password.
+    rootPasswordKey: mariadb-root-password
+
+  persistence:
+    # -- StorageClass for the data volume. Empty = cluster default.
+    storageClass: ""
+    # -- Access modes for the data volume.
+    accessModes:
+      - ReadWriteOnce
+    # -- Size of the data volume.
+    size: 8Gi
+
+  # -- Extra server settings, rendered into a ConfigMap mounted at
+  # /etc/mysql/conf.d/zz-chart.cnf.
+  config: |
+    [mysqld]
+    character-set-server  = utf8mb4
+    collation-server      = utf8mb4_unicode_ci
+    skip-name-resolve
+    innodb_buffer_pool_size = 256M
+
+  # -- MariaDB container resources. Raise the memory limit with innodb_buffer_pool_size.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 384Mi
+    limits:
+      memory: 768Mi
+
+  # -- MariaDB pod security context. uid/gid 999 is the mysql user in the official image.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  # -- MariaDB container security context. /var/lib/mysql, /run/mysqld and /tmp are the only writable paths.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+
+  # -- Node selector for the MariaDB pod.
+  nodeSelector: {}
+  # -- Tolerations for the MariaDB pod.
+  tolerations: []
+  # -- Affinity rules for the MariaDB pod.
+  affinity: {}
+
+## =============================================================================
+## GLPI persistence
+## =============================================================================
+
+## One volume mounted at /var/glpi in the php-fpm, cron and init containers:
+##   config/       config_db.php and the encryption keys (back these up)
+##   files/        documents, pictures, sessions, cache
+##   logs/         GLPI log files
+##   marketplace/  plugins installed from the marketplace
+## All containers are in one pod, so ReadWriteOnce is sufficient.
+persistence:
+  # -- Persist /var/glpi. When false an emptyDir is used (data and the encryption keys are lost on pod restart).
+  enabled: true
+  # -- Use an existing PVC instead of creating one.
+  existingClaim: ""
+  # -- StorageClass for the data volume. Empty = cluster default.
+  storageClass: ""
+  # -- Access modes for the data volume.
+  accessModes:
+    - ReadWriteOnce
+  # -- Size of the data volume.
+  size: 10Gi
+  # -- Extra annotations on the PVC (helm.sh/resource-policy: keep is always set).
+  annotations: {}
+
+## =============================================================================
+## Networking
+## =============================================================================
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port (targets nginx's http port).
+  port: 80
+  # -- Service annotations.
+  annotations: {}
+
+## Gateway API HTTPRoute. TLS terminates at the Gateway. The backend is plain
+## HTTP to nginx.
+httpRoute:
+  # -- Create a Gateway API HTTPRoute.
+  enabled: false
+  # -- HTTPRoute annotations.
+  annotations: {}
+  # -- Gateways to attach to, e.g.
+  #   - name: my-gateway
+  #     namespace: gateway-system
+  #     sectionName: https
+  parentRefs: []
+  # -- Hostnames, e.g. [glpi.example.com]. Usually matches glpi.url.
+  hostnames: []
+
+## Kubernetes Ingress: optional alternative to httpRoute (both may be enabled).
+## TLS terminates at the ingress controller. The backend is plain HTTP to nginx.
+ingress:
+  # -- Create an Ingress.
+  enabled: false
+  # -- IngressClass to use. Empty = cluster default class.
+  className: ""
+  # -- Controller-specific annotations. Most controllers cap request bodies
+  # below the 50 MB upload limit by default, so raise theirs too, e.g.
+  #   nginx.ingress.kubernetes.io/proxy-body-size: 55m
+  #   cert-manager.io/cluster-issuer: my-issuer
+  annotations: {}
+  # -- Hostnames, e.g. [glpi.example.com]. Usually matches glpi.url.
+  hosts: []
+  # -- Path matched on every host.
+  path: /
+  # -- Ingress pathType.
+  pathType: Prefix
+  # -- TLS blocks, e.g.
+  #   - secretName: glpi-tls
+  #     hosts: [glpi.example.com]
+  tls: []
+
+## =============================================================================
+## GLPI pod
+## =============================================================================
+
+# -- Fixed at 1: the data volume is ReadWriteOnce and the Deployment uses the
+# Recreate strategy so the old pod releases it before the new one starts.
+replicaCount: 1
+
+## The database is installed or updated in an init container before php-fpm
+## starts: bin/console database:install on an empty database, otherwise
+## database:update, so an image upgrade migrates the schema first. The same
+## step writes config_db.php from the chart's database settings.
+migrations:
+  # -- Install or update the database in an init container before GLPI starts.
+  enabled: true
+  waitForDatabase:
+    # -- Wait in an init container until the database accepts a login before
+    # migrating. Avoids failed attempts while MariaDB initialises.
+    enabled: true
+    # -- How long to wait, in seconds, before failing the pod start.
+    timeoutSeconds: 300
+
+resources:
+  # -- php-fpm container resources (also used by the init containers).
+  app:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  # -- nginx sidecar resources.
+  nginx:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  # -- cron container resources.
+  cron:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 512Mi
+
+# -- Pod-level security context. uid/gid 33 owns the data paths in the GLPI image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 33
+  runAsGroup: 33
+  fsGroup: 33
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context (applied to php-fpm, cron, nginx and init
+# containers). The root filesystem is read-only. The chart mounts the data
+# volume at /var/glpi and emptyDirs for /tmp.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+## Probes. Both reach php-fpm through nginx on a separate health port (not
+## exposed by the Service), so they never create GLPI sessions.
+probes:
+  # -- Port of nginx's health server (/fpm-ping). Not exposed by the Service.
+  healthPort: 8081
+  # -- Liveness probe timings (php-fpm via /fpm-ping, nginx via TCP).
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  # -- Readiness probe timings (php-fpm answering through nginx).
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+## `helm test` hook: a pod that checks the running release through its Service
+## (login page, static assets, hardening rules).
+tests:
+  # -- Render the `helm test` pod (templates/test-connection.yaml).
+  enabled: true
+
+# -- Extra annotations on the GLPI pod.
+podAnnotations: {}
+# -- Extra labels on the GLPI pod.
+podLabels: {}
+# -- Node selector for the GLPI pod.
+nodeSelector: {}
+# -- Tolerations for the GLPI pod.
+tolerations: []
+# -- Affinity rules for the GLPI pod.
+affinity: {}

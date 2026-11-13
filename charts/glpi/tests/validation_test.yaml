@@ -1,0 +1,116 @@
+suite: render-time validation
+templates:
+  # The Deployment includes the ConfigMaps for its checksum annotations.
+  - deployment.yaml
+  - configmap-glpi.yaml
+  - configmap-nginx.yaml
+  - configmap-php.yaml
+tests:
+  - it: renders with no values set
+    asserts:
+      - template: deployment.yaml
+        isKind:
+          of: Deployment
+
+  - it: rejects a URL without a scheme
+    set:
+      glpi.url: desk.example.com
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "glpi.url must start with http:// or https://"
+
+  - it: rejects a trailing slash on the URL
+    set:
+      glpi.url: https://desk.example.com/
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "must not end with a slash"
+
+  - it: rejects uploadLimitMB below 1
+    set:
+      glpi.uploadLimitMB: 0
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "uploadLimitMB must be a positive number"
+
+  - it: rejects upload limits in php.extraIni
+    set:
+      php.extraIni: |
+        memory_limit = 512M
+        post_max_size = 1G
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "php.extraIni must not set upload_max_filesize or post_max_size"
+
+  - it: allows other settings in php.extraIni
+    set:
+      php.extraIni: "memory_limit = 512M"
+    asserts:
+      - template: deployment.yaml
+        isKind:
+          of: Deployment
+
+  - it: rejects replicaCount other than 1
+    set:
+      replicaCount: 2
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "replicaCount must be 1"
+
+  - it: rejects a cron interval below 1
+    set:
+      cron.intervalSeconds: 0
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "cron.intervalSeconds must be a positive number"
+
+  - it: requires externalDatabase.host when MariaDB is disabled
+    set:
+      mariadb.enabled: false
+      externalDatabase.existingSecret: db
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "externalDatabase.host is required"
+
+  - it: requires externalDatabase.existingSecret when MariaDB is disabled
+    set:
+      mariadb.enabled: false
+      externalDatabase.host: db.example
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "externalDatabase.existingSecret is required"
+
+  - it: rejects a name in glpi.constants that is not a GLPI constant
+    set:
+      glpi.constants:
+        "FOO'); system('id": x
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "is not a GLPI constant name"
+
+  - it: rejects a proxy constant in glpi.constants
+    set:
+      glpi.constants:
+        GLPI_TRUSTED_REVERSE_PROXIES: [10.0.0.1]
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "glpi.constants.GLPI_TRUSTED_REVERSE_PROXIES is set by the chart"
+
+  - it: rejects a data path constant in glpi.constants
+    set:
+      glpi.constants:
+        GLPI_VAR_DIR: /somewhere/else
+    asserts:
+      - template: deployment.yaml
+        failedTemplate:
+          errorPattern: "glpi.constants.GLPI_VAR_DIR is a data path fixed by the image"

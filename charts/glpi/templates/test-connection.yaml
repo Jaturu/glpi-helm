@@ -1,0 +1,94 @@
+{{- if .Values.tests.enabled }}
+{{- /*
+  `helm test` hook: checks a running release through its Service, the same
+  path the Gateway / Ingress uses. Runs the GLPI image's own PHP CLI, so no
+  extra image is needed, under the same restricted security context.
+*/ -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "glpi.fullname" . }}-test
+  labels:
+    {{- include "glpi.labels" (dict "ctx" $ "component" "test") | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    - name: test
+      image: {{ include "glpi.imageRef" (dict "image" .Values.image "default" .Chart.AppVersion) }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+      env:
+        - name: GLPI_TEST_URL
+          value: http://{{ include "glpi.fullname" . }}:{{ .Values.service.port }}
+      command: ["php", "-r"]
+      args:
+        - |
+          $base = getenv('GLPI_TEST_URL');
+          $failed = 0;
+          function get(string $url): array {
+              $ctx = stream_context_create(['http' => [
+                  'ignore_errors' => true, 'follow_location' => 0, 'timeout' => 30,
+              ]]);
+              $body = @file_get_contents($url, false, $ctx);
+              $code = isset($http_response_header[0])
+                  ? (int) explode(' ', $http_response_header[0])[1] : 0;
+              return [$code, (string) $body];
+          }
+          function check(string $name, bool $ok, string $detail = ''): void {
+              global $failed;
+              echo ($ok ? 'PASS ' : 'FAIL ') . $name . ($ok ? '' : "  [$detail]") . PHP_EOL;
+              if (!$ok) { $failed = 1; }
+          }
+          echo "Testing $base" . PHP_EOL;
+
+          // Application renders: database installed and reachable.
+          [$code, $body] = get("$base/");
+          check('GET / returns 200', $code === 200, "HTTP $code");
+          check('login page renders a form', str_contains($body, 'name="login_password"'), substr($body, 0, 200));
+
+          // GLPI's own status: application and database.
+          [$code, $body] = get("$base/status.php");
+          $status = json_decode($body, true) ?: [];
+          check('GET /status.php returns 200', $code === 200, "HTTP $code");
+          foreach (['glpi', 'db'] as $k) {
+              check("/status.php reports $k OK", ($status[$k]['status'] ?? '') === 'OK', $body);
+          }
+
+          // Legacy script paths are routed through the front controller.
+          [$code] = get("$base/front/central.php");
+          check('GET /front/central.php redirects to login', $code === 302, "HTTP $code");
+
+          // nginx serves static assets directly.
+          [$code] = get("$base/pics/favicon.ico");
+          check('GET /pics/favicon.ico returns 200', $code === 200, "HTTP $code");
+
+          // Hardening: dotfiles denied, nothing outside public/ is served.
+          [$code] = get("$base/.env");
+          check('dotfiles are denied', in_array($code, [403, 404], true), "HTTP $code");
+          [$code, $body] = get("$base/config/config_db.php");
+          check('config files are not served', $code === 404 && !str_contains($body, 'DBmysql'), "HTTP $code");
+          [$code] = get("$base/files/_log/php-errors.log");
+          check('data files are not served', $code === 404, "HTTP $code");
+
+          exit($failed);
+      volumeMounts:
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: tmp
+      emptyDir: {}
+{{- end }}

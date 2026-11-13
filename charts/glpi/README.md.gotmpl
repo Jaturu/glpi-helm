@@ -1,0 +1,138 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.badgesSection" . }}
+
+{{ template "chart.description" . }}
+
+[GLPI](https://glpi-project.org/) is an IT asset management and service desk
+application: inventory, tickets, changes, contracts and a knowledge base. This
+chart runs it on a purpose-built, non-root image and is designed to pass the
+Kubernetes `restricted` Pod Security Standard.
+
+## Features
+
+- Non-root php-fpm + nginx-unprivileged in one pod, read-only root
+  filesystems, all capabilities dropped, `RuntimeDefault` seccomp.
+- Optional built-in MariaDB (official `mariadb` image, LTS series) or any
+  external MySQL 8.0+ / MariaDB 10.11+.
+- Database installed on first start and updated on every image upgrade, in an
+  init container, before GLPI serves requests.
+- Scheduled tasks run by a `cron` container in the same pod.
+- Generated database passwords that survive upgrades and are kept on
+  uninstall.
+- Gateway API `HTTPRoute` and/or `Ingress`.
+- Render-time validation of required and conflicting values.
+
+## Installing
+
+```console
+helm repo add glpi https://jaturu.github.io/glpi-helm
+helm repo update
+helm install desk glpi/glpi \
+  --namespace glpi --create-namespace \
+  --set glpi.url=https://glpi.example.com
+```
+
+Or install straight from the OCI registry, without `helm repo add`:
+
+```console
+helm install desk oci://ghcr.io/jaturu/charts/glpi --version {{ template "chart.version" . }} \
+  --namespace glpi --create-namespace \
+  --set glpi.url=https://glpi.example.com
+```
+
+No value is required. `glpi.url` is recommended: GLPI uses it for links in
+notifications, and an https URL marks the session cookie Secure.
+
+The first login is `glpi` / `glpi`. GLPI ships four default accounts (`glpi`,
+`tech`, `normal`, `post-only`). Change their passwords or disable them
+immediately.
+
+### Example: Gateway API
+
+```yaml
+glpi:
+  url: https://glpi.example.com
+  # Pod network of the gateway, so GLPI trusts X-Forwarded-* headers.
+  trustedProxies:
+    - 10.244.0.0/16
+
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: my-gateway
+      namespace: gateway-system
+      sectionName: https
+  hostnames:
+    - glpi.example.com
+
+persistence:
+  storageClass: fast-rwo
+mariadb:
+  persistence:
+    storageClass: fast-rwo
+```
+
+### Example: Ingress with cert-manager
+
+```yaml
+glpi:
+  url: https://glpi.example.com
+  trustedProxies:
+    - 10.0.0.0/8
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 55m
+  hosts:
+    - glpi.example.com
+  tls:
+    - secretName: glpi-tls
+      hosts:
+        - glpi.example.com
+```
+
+## Data to back up
+
+GLPI keeps state in two places, and a restore needs both from the same point
+in time:
+
+- the database,
+- the data volume mounted at `/var/glpi`. Its `config/` directory holds
+  `glpicrypt.key`, which decrypts the passwords GLPI stores in the database
+  (LDAP, mail collectors, API tokens). Without that file those values cannot
+  be recovered.
+
+See [Backup and restore](https://github.com/Jaturu/glpi-helm/blob/main/docs/database.md#backup-and-restore).
+
+## Guides
+
+| Guide | Covers |
+|-------|--------|
+| [Installing](https://github.com/Jaturu/glpi-helm/blob/main/docs/installing.md) | A production install behind a gateway, from namespace to first login |
+| [Architecture](https://github.com/Jaturu/glpi-helm/blob/main/docs/architecture.md) | Pod layout, startup sequence, volumes, security model, probes |
+| [Database](https://github.com/Jaturu/glpi-helm/blob/main/docs/database.md) | Built-in vs external database, secrets and keys, backup and restore |
+| [Exposure](https://github.com/Jaturu/glpi-helm/blob/main/docs/exposure.md) | HTTPRoute and Ingress, TLS, trusted proxies, upload size limits |
+| [Email](https://github.com/Jaturu/glpi-helm/blob/main/docs/email.md) | Sending and receiving mail, configured in the GLPI UI |
+| [Upgrading](https://github.com/Jaturu/glpi-helm/blob/main/docs/upgrading.md) | GLPI and MariaDB upgrades, plugins, what uninstall leaves behind |
+| [Image](https://github.com/Jaturu/glpi-helm/blob/main/docs/image.md) | How the container image is built and versioned |
+| [Testing](https://github.com/Jaturu/glpi-helm/blob/main/docs/testing.md) | Unit, schema and image tests |
+
+## Uninstalling
+
+```console
+helm uninstall desk -n glpi
+```
+
+By design this keeps the MariaDB Secret, the GLPI data PVC and the MariaDB
+data PVC. Delete them explicitly to remove all data. See
+[Upgrading](https://github.com/Jaturu/glpi-helm/blob/main/docs/upgrading.md#uninstalling).
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}
+
+{{ template "helm-docs.versionFooter" . }}

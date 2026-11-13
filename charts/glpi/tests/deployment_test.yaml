@@ -1,0 +1,427 @@
+suite: glpi deployment
+templates:
+  - deployment.yaml
+  - configmap-glpi.yaml
+  - configmap-nginx.yaml
+  - configmap-php.yaml
+release:
+  name: desk
+  namespace: glpi
+chart:
+  appVersion: 99.0.1
+tests:
+  # ---------------------------------------------------------------- workload
+  - it: is a single-replica Deployment with the Recreate strategy
+    template: deployment.yaml
+    asserts:
+      - equal: { path: metadata.name, value: desk-glpi }
+      - equal: { path: spec.replicas, value: 1 }
+      - equal: { path: spec.strategy.type, value: Recreate }
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: glpi
+            app.kubernetes.io/instance: desk
+            app.kubernetes.io/component: app
+
+  - it: disables service-account token and service links
+    template: deployment.yaml
+    asserts:
+      - equal: { path: spec.template.spec.automountServiceAccountToken, value: false }
+      - equal: { path: spec.template.spec.enableServiceLinks, value: false }
+
+  - it: carries checksums of all three ConfigMaps
+    template: deployment.yaml
+    asserts:
+      - exists: { path: 'spec.template.metadata.annotations["checksum/config"]' }
+      - exists: { path: 'spec.template.metadata.annotations["checksum/nginx"]' }
+      - exists: { path: 'spec.template.metadata.annotations["checksum/php"]' }
+
+  # ------------------------------------------------------------------ images
+  - it: defaults the app image tag to the chart appVersion
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].image
+          value: ghcr.io/jaturu/glpi:99.0.1
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "cron")].image
+          value: ghcr.io/jaturu/glpi:99.0.1
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].image
+          value: ghcr.io/jaturu/glpi:99.0.1
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].image
+          value: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+
+  - it: uses an explicit tag over appVersion
+    template: deployment.yaml
+    set:
+      image.tag: 1.2.3
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].image
+          value: ghcr.io/jaturu/glpi:1.2.3
+
+  - it: prefers a digest over the tag
+    template: deployment.yaml
+    set:
+      image.tag: 1.2.3
+      image.digest: sha256:abc
+      nginx.image.digest: sha256:def
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].image
+          value: ghcr.io/jaturu/glpi@sha256:abc
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].image
+          value: docker.io/nginxinc/nginx-unprivileged@sha256:def
+
+  - it: keeps version labels off the pod template, so chart upgrades alone do not restart it
+    template: deployment.yaml
+    chart:
+      version: 9.9.9
+      appVersion: 99.0.1
+    asserts:
+      - equal:
+          path: spec.template.metadata.labels
+          value:
+            app.kubernetes.io/name: glpi
+            app.kubernetes.io/instance: desk
+            app.kubernetes.io/component: app
+            app.kubernetes.io/managed-by: Helm
+            app.kubernetes.io/part-of: glpi
+      - equal: { path: 'metadata.labels["helm.sh/chart"]', value: glpi-9.9.9 }
+      - equal: { path: 'metadata.labels["app.kubernetes.io/version"]', value: 99.0.1 }
+
+  # --------------------------------------------------------- init containers
+  - it: runs copy-assets, wait-for-database, then migrate, in that order
+    template: deployment.yaml
+    asserts:
+      - lengthEqual: { path: spec.template.spec.initContainers, count: 3 }
+      - equal: { path: 'spec.template.spec.initContainers[0].name', value: copy-assets }
+      - equal: { path: 'spec.template.spec.initContainers[1].name', value: wait-for-database }
+      - equal: { path: 'spec.template.spec.initContainers[2].name', value: migrate }
+
+  - it: omits both database init containers when migrations are disabled
+    template: deployment.yaml
+    set:
+      migrations.enabled: false
+    asserts:
+      - lengthEqual: { path: spec.template.spec.initContainers, count: 1 }
+      - equal: { path: 'spec.template.spec.initContainers[0].name', value: copy-assets }
+
+  - it: can skip the database wait and still migrate
+    template: deployment.yaml
+    set:
+      migrations.waitForDatabase.enabled: false
+    asserts:
+      - lengthEqual: { path: spec.template.spec.initContainers, count: 2 }
+      - equal: { path: 'spec.template.spec.initContainers[1].name', value: migrate }
+
+  - it: runs the bundled wait script with php -r, without the opening tag
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "wait-for-database")].command[0]
+          value: php
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "wait-for-database")].command[1]
+          value: -r
+      - matchRegex:
+          path: spec.template.spec.initContainers[?(@.name == "wait-for-database")].command[2]
+          pattern: 'real_connect\('
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[?(@.name == "wait-for-database")].command[2]
+          pattern: '<\?php'
+
+  - it: gives the wait the database settings plus its timeout
+    template: deployment.yaml
+    set:
+      migrations.waitForDatabase.timeoutSeconds: 90
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "wait-for-database")].env
+          value:
+            - { name: GLPI_DB_HOST, value: desk-glpi-mariadb }
+            - { name: GLPI_DB_PORT, value: "3306" }
+            - { name: GLPI_DB_NAME, value: glpi }
+            - { name: GLPI_DB_USER, value: glpi }
+            - name: GLPI_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: desk-glpi-mariadb, key: mariadb-password } }
+            - { name: WAIT_TIMEOUT, value: "90" }
+
+  - it: runs the bundled migrate script, which installs or updates
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].command[0]
+          value: sh
+      - matchRegex:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].command[2]
+          pattern: '(?s)set -eu.*database:install.*database:configure.*database:update'
+
+  - it: copies public/ and creates the data directories without touching data
+    template: deployment.yaml
+    asserts:
+      # -a would fail as non-root on root-owned volume mount points
+      - notMatchRegex:
+          path: spec.template.spec.initContainers[0].args[0]
+          pattern: 'cp -a'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].args[0]
+          pattern: 'cp -R /var/www/glpi/public/\. /public/ && mkdir -p /var/glpi/config /var/glpi/files /var/glpi/logs /var/glpi/marketplace$'
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          value:
+            - { name: public, mountPath: /public }
+            - { name: data, mountPath: /var/glpi }
+
+  # ----------------------------------------------------------------- mounts
+  - it: gives migrate, glpi and cron identical mounts
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].volumeMounts
+          value: &appMounts
+            - { name: data, mountPath: /var/glpi }
+            - { name: app-tmp, mountPath: /tmp }
+            - { name: php-conf, mountPath: /etc/glpi/php.d, readOnly: true }
+            - { name: glpi-conf, mountPath: /var/www/glpi/config/local_define.php, subPath: local_define.php, readOnly: true }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].volumeMounts
+          value: *appMounts
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "cron")].volumeMounts
+          value: *appMounts
+
+  - it: mounts only public/ and its config in nginx, read-only
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].volumeMounts
+          value:
+            - { name: public, mountPath: /var/www/glpi/public, readOnly: true }
+            - { name: nginx-conf, mountPath: /etc/nginx/conf.d, readOnly: true }
+            - { name: nginx-tmp, mountPath: /tmp }
+
+  - it: uses the chart PVC by default
+    template: deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: data, persistentVolumeClaim: { claimName: desk-glpi-data } }
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: php-conf, configMap: { name: desk-glpi-php } }
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: nginx-conf, configMap: { name: desk-glpi-nginx } }
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: glpi-conf, configMap: { name: desk-glpi-config } }
+
+  - it: uses an existing claim when given
+    template: deployment.yaml
+    set:
+      persistence.existingClaim: my-claim
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: data, persistentVolumeClaim: { claimName: my-claim } }
+
+  - it: falls back to an emptyDir when persistence is disabled
+    template: deployment.yaml
+    set:
+      persistence.enabled: false
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: data, emptyDir: {} }
+
+  # -------------------------------------------------------------------- env
+  - it: gives the database settings to migrate only
+    template: deployment.yaml
+    set:
+      glpi.url: https://desk.example.com
+      glpi.defaultLanguage: fr_FR
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].env
+          value:
+            - { name: GLPI_DB_HOST, value: desk-glpi-mariadb }
+            - { name: GLPI_DB_PORT, value: "3306" }
+            - { name: GLPI_DB_NAME, value: glpi }
+            - { name: GLPI_DB_USER, value: glpi }
+            - name: GLPI_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: desk-glpi-mariadb, key: mariadb-password } }
+            - { name: GLPI_DEFAULT_LANGUAGE, value: fr_FR }
+            - { name: GLPI_URL, value: https://desk.example.com }
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "glpi")].env
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "glpi")].envFrom
+
+  - it: wires an external database
+    template: deployment.yaml
+    set:
+      mariadb.enabled: false
+      externalDatabase.host: db.example
+      externalDatabase.port: 3307
+      externalDatabase.database: itsm
+      externalDatabase.username: itsmuser
+      externalDatabase.existingSecret: ext-db
+      externalDatabase.passwordKey: pw
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].env
+          content: { name: GLPI_DB_HOST, value: db.example }
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].env
+          content: { name: GLPI_DB_PORT, value: "3307" }
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].env
+          content: { name: GLPI_DB_NAME, value: itsm }
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].env
+          content: { name: GLPI_DB_USER, value: itsmuser }
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "wait-for-database")].env
+          content:
+            name: GLPI_DB_PASSWORD
+            valueFrom: { secretKeyRef: { name: ext-db, key: pw } }
+
+  - it: appends extraEnv and extraEnvFrom to migrate, glpi and cron
+    template: deployment.yaml
+    set:
+      glpi.extraEnv:
+        - name: LDAP_BIND_PASSWORD
+          valueFrom: { secretKeyRef: { name: ldap, key: password } }
+      glpi.extraEnvFrom:
+        - secretRef: { name: extra }
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].env
+          value: &extra
+            - name: LDAP_BIND_PASSWORD
+              valueFrom: { secretKeyRef: { name: ldap, key: password } }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].envFrom
+          value: &extraFrom
+            - secretRef: { name: extra }
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "cron")].env
+          content:
+            name: LDAP_BIND_PASSWORD
+            valueFrom: { secretKeyRef: { name: ldap, key: password } }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "cron")].envFrom
+          value: *extraFrom
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].env
+          content:
+            name: LDAP_BIND_PASSWORD
+            valueFrom: { secretKeyRef: { name: ldap, key: password } }
+      - equal:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].envFrom
+          value: *extraFrom
+
+  # ------------------------------------------------------------------- cron
+  - it: runs front/cron.php in a loop that stops on SIGTERM
+    template: deployment.yaml
+    set:
+      cron.intervalSeconds: 120
+    asserts:
+      - lengthEqual: { path: spec.template.spec.containers, count: 3 }
+      - matchRegex:
+          path: spec.template.spec.containers[?(@.name == "cron")].command[2]
+          pattern: "(?s)trap 'exit 0' TERM INT.*php front/cron\\.php.*sleep \"\\$CRON_INTERVAL\" & wait"
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "cron")].env
+          value:
+            - { name: CRON_INTERVAL, value: "120" }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "cron")].resources
+          value:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 512Mi }
+
+  - it: omits the cron container when disabled
+    template: deployment.yaml
+    set:
+      cron.enabled: false
+    asserts:
+      - lengthEqual: { path: spec.template.spec.containers, count: 2 }
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "cron")]
+
+  # ---------------------------------------------------------- ports, probes
+  - it: exposes http and health ports on nginx only
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].ports
+          value:
+            - { name: http, containerPort: 8080, protocol: TCP }
+            - { name: health, containerPort: 8081, protocol: TCP }
+      - notExists:
+          path: spec.template.spec.containers[?(@.name == "glpi")].ports
+
+  - it: probes php-fpm through the health port, never through GLPI
+    template: deployment.yaml
+    asserts:
+      # Numeric: named ports are per container.
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].livenessProbe.httpGet
+          value: { path: /fpm-ping, port: 8081 }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].readinessProbe.httpGet
+          value: { path: /fpm-ping, port: health }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].livenessProbe.tcpSocket
+          value: { port: http }
+
+  - it: follows a custom health port
+    template: deployment.yaml
+    set:
+      probes.healthPort: 9091
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "glpi")].livenessProbe.httpGet.port
+          value: 9091
+
+  # --------------------------------------------------------------- security
+  - it: applies the restricted security context to every container
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 33
+            runAsGroup: 33
+            fsGroup: 33
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+      - equal:
+          path: spec.template.spec.containers[*].securityContext
+          value: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+      - equal:
+          path: spec.template.spec.initContainers[*].securityContext
+          value: *restricted
+
+  - it: passes scheduling settings through
+    template: deployment.yaml
+    set:
+      nodeSelector: { kubernetes.io/os: linux }
+      tolerations: [{ key: dedicated, operator: Exists }]
+      podLabels: { team: it }
+      podAnnotations: { note: hi }
+    asserts:
+      - equal: { path: spec.template.spec.nodeSelector, value: { kubernetes.io/os: linux } }
+      - equal: { path: spec.template.spec.tolerations, value: [{ key: dedicated, operator: Exists }] }
+      - equal: { path: spec.template.metadata.labels.team, value: it }
+      - equal: { path: spec.template.metadata.annotations.note, value: hi }
