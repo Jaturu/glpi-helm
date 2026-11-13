@@ -48,6 +48,9 @@ The first login is `glpi` / `glpi`. GLPI ships four default accounts (`glpi`,
 `tech`, `normal`, `post-only`). Change their passwords or disable them
 immediately.
 
+For a production install, follow
+[Installing](https://github.com/Jaturu/glpi-helm/blob/main/docs/installing.md).
+
 ### Example: Gateway API
 
 ```yaml
