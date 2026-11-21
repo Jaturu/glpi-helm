@@ -1,6 +1,6 @@
 # glpi
 
-![Version: 0.1.0](https://img.shields.io/badge/Version-0.1.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 12.0.2](https://img.shields.io/badge/AppVersion-12.0.2-informational?style=flat-square)
+![Version: 0.2.0](https://img.shields.io/badge/Version-0.2.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 12.0.2](https://img.shields.io/badge/AppVersion-12.0.2-informational?style=flat-square)
 
 GLPI IT asset management and service desk on a non-root php-fpm image with an nginx-unprivileged sidecar, optional built-in MariaDB (official image), and Gateway API HTTPRoute support.
 
@@ -21,6 +21,10 @@ Kubernetes `restricted` Pod Security Standard.
 - Generated database passwords that survive upgrades and are kept on
   uninstall.
 - Gateway API `HTTPRoute` and/or `Ingress`.
+- Optional sign-in from a trusted header set by a sign-in proxy
+  (`remoteUserAuth`), checked by source address and/or a shared key.
+- Extra env, volumes and mounts for the GLPI and nginx containers, and extra
+  nginx directives for the application server.
 - Render-time validation of required and conflicting values.
 
 ## Installing
@@ -36,7 +40,7 @@ helm install desk glpi/glpi \
 Or install straight from the OCI registry, without `helm repo add`:
 
 ```console
-helm install desk oci://ghcr.io/jaturu/charts/glpi --version 0.1.0 \
+helm install desk oci://ghcr.io/jaturu/charts/glpi --version 0.2.0 \
   --namespace glpi --create-namespace \
   --set glpi.url=https://glpi.example.com
 ```
@@ -98,6 +102,28 @@ ingress:
         - glpi.example.com
 ```
 
+### Example: sign-in proxy
+
+A sign-in proxy (forward-auth on the gateway, or a proxy of its own) sends the
+signed-in username in a header. nginx passes it to GLPI as `REMOTE_USER` only
+when the request also carries a shared key, and PHP never sees either header.
+Requests without the key reach GLPI anonymous, so local login keeps working.
+
+```yaml
+remoteUserAuth:
+  enabled: true
+  header: X-Forwarded-User      # the header your proxy sends
+  sharedKey:
+    header: X-GLPI-Proxy-Key    # the proxy adds this to every request
+    existingSecret: glpi-proxy-key
+    secretKey: key              # openssl rand -hex 32
+```
+
+Then enable automatic authentication with `REMOTE_USER` in GLPI, under Setup >
+Authentication > Other authentication methods. See
+[Sign-in proxy](https://github.com/Jaturu/glpi-helm/blob/main/docs/exposure.md#sign-in-proxy)
+for the address check (`allowFrom`), key rules and caveats.
+
 ## Data to back up
 
 GLPI keeps state in two places, and a restore needs both from the same point
@@ -118,7 +144,7 @@ See [Backup and restore](https://github.com/Jaturu/glpi-helm/blob/main/docs/data
 | [Installing](https://github.com/Jaturu/glpi-helm/blob/main/docs/installing.md) | A production install behind a gateway, from namespace to first login |
 | [Architecture](https://github.com/Jaturu/glpi-helm/blob/main/docs/architecture.md) | Pod layout, startup sequence, volumes, security model, probes |
 | [Database](https://github.com/Jaturu/glpi-helm/blob/main/docs/database.md) | Built-in vs external database, secrets and keys, backup and restore |
-| [Exposure](https://github.com/Jaturu/glpi-helm/blob/main/docs/exposure.md) | HTTPRoute and Ingress, TLS, trusted proxies, upload size limits |
+| [Exposure](https://github.com/Jaturu/glpi-helm/blob/main/docs/exposure.md) | HTTPRoute and Ingress, TLS, trusted proxies, upload size limits, sign-in proxy |
 | [Email](https://github.com/Jaturu/glpi-helm/blob/main/docs/email.md) | Sending and receiving mail, configured in the GLPI UI |
 | [Upgrading](https://github.com/Jaturu/glpi-helm/blob/main/docs/upgrading.md) | GLPI and MariaDB upgrades, plugins, what uninstall leaves behind |
 | [Image](https://github.com/Jaturu/glpi-helm/blob/main/docs/image.md) | How the container image is built and versioned |
@@ -156,6 +182,8 @@ Kubernetes: `>=1.29.0-0`
 | glpi.defaultLanguage | string | `"en_GB"` | Default UI language, applied when the database is first installed. |
 | glpi.extraEnv | list | `[]` | Extra container env entries (full EnvVar objects, e.g. secretKeyRef), applied to the php-fpm, cron and migrate containers. |
 | glpi.extraEnvFrom | list | `[]` | Extra envFrom sources (whole Secrets/ConfigMaps), applied likewise. |
+| glpi.extraVolumeMounts | list | `[]` | Extra volume mounts (full VolumeMount objects), applied to the php-fpm, cron and migrate containers. |
+| glpi.extraVolumes | list | `[]` | Extra pod volumes for the GLPI containers (full Volume objects). Mount them with glpi.extraVolumeMounts. |
 | glpi.reverseProxyHeaders | list | `["X-Forwarded-For","X-Forwarded-Proto"]` | Headers trusted from those proxies (GLPI_REVERSE_PROXY_HEADERS). |
 | glpi.timezone | string | `"UTC"` | PHP timezone (date.timezone). |
 | glpi.trustedProxies | list | `[]` | Reverse proxies whose forwarding headers GLPI trusts (GLPI_TRUSTED_REVERSE_PROXIES). A list of IPs or CIDRs. Set this to the gateway/ingress pod network so GLPI sees the real scheme and client IP. |
@@ -201,6 +229,10 @@ Kubernetes: `>=1.29.0-0`
 | migrations.waitForDatabase.enabled | bool | `true` | Wait in an init container until the database accepts a login before migrating. Avoids failed attempts while MariaDB initialises. |
 | migrations.waitForDatabase.timeoutSeconds | int | `300` | How long to wait, in seconds, before failing the pod start. |
 | nameOverride | string | `""` | Override the chart name used in resource names. |
+| nginx.extraEnvVars | list | `[]` | Extra env entries for the nginx container (full EnvVar objects). |
+| nginx.extraServerConfig | string | `""` | nginx directives added at the end of the application server block (the one the Service exposes, not the health server), e.g. `location = /robots.txt { return 200 "User-agent: *\nDisallow: /\n"; }`. The rendered configuration must pass nginx -t, or nginx does not start. |
+| nginx.extraVolumeMounts | list | `[]` | Extra volume mounts for the nginx container (full VolumeMount objects). |
+| nginx.extraVolumes | list | `[]` | Extra pod volumes for nginx (full Volume objects). Mount them with nginx.extraVolumeMounts. |
 | nginx.image.digest | string | `""` | Optional nginx image digest (sha256:...). Takes precedence over tag. |
 | nginx.image.pullPolicy | string | `"IfNotPresent"` | nginx image pull policy. |
 | nginx.image.repository | string | `"docker.io/nginxinc/nginx-unprivileged"` | nginx sidecar image repository. |
@@ -220,6 +252,12 @@ Kubernetes: `>=1.29.0-0`
 | probes.healthPort | int | `8081` | Port of nginx's health server (/fpm-ping). Not exposed by the Service. |
 | probes.liveness | object | `{"failureThreshold":3,"initialDelaySeconds":10,"periodSeconds":20,"timeoutSeconds":3}` | Liveness probe timings (php-fpm via /fpm-ping, nginx via TCP). |
 | probes.readiness | object | `{"failureThreshold":3,"initialDelaySeconds":5,"periodSeconds":10,"timeoutSeconds":5}` | Readiness probe timings (php-fpm answering through nginx). |
+| remoteUserAuth.allowFrom | list | `[]` | Only these client addresses (IPs or CIDRs, nginx allow) may reach the application server, every other client gets 403. List the proxy's addresses as nginx sees them. The `helm test` pod is denied too unless its address is listed. Empty = no address restriction. |
+| remoteUserAuth.enabled | bool | `false` | Pass a trusted username header to GLPI as REMOTE_USER. |
+| remoteUserAuth.header | string | `""` | Request header that carries the username, e.g. X-authentik-username, Remote-User or X-Forwarded-User. Letters, digits and dashes only. |
+| remoteUserAuth.sharedKey.existingSecret | string | `""` | Secret holding the key. nginx reads it at startup and refuses to start if it is empty, REPLACE_ME, shorter than 32 characters, or has characters other than letters, digits, - and _. Generate one with `openssl rand -hex 32`. |
+| remoteUserAuth.sharedKey.header | string | `""` | Request header that carries the key, e.g. X-GLPI-Proxy-Key. Set header, existingSecret and secretKey together, or none of them. |
+| remoteUserAuth.sharedKey.secretKey | string | `""` | Key in sharedKey.existingSecret holding the key. |
 | replicaCount | int | `1` | Fixed at 1: the data volume is ReadWriteOnce and the Deployment uses the Recreate strategy so the old pod releases it before the new one starts. |
 | resources.app | object | `{"limits":{"memory":"1Gi"},"requests":{"cpu":"100m","memory":"256Mi"}}` | php-fpm container resources (also used by the init containers). |
 | resources.cron | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | cron container resources. |

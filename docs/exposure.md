@@ -134,6 +134,103 @@ Setup > General > Management. The smallest of the three limits wins.
 Inventory agents post their data to the same hostname. A full inventory of a
 large machine can run to several megabytes, well inside the default limit.
 
+## Sign-in proxy
+
+A sign-in proxy in front of GLPI (for example authentik, Authelia or
+oauth2-proxy, as a forward-auth step on the gateway or as a proxy of its own)
+can sign users in to GLPI. The proxy authenticates the user and sends the
+username in a request header. With `remoteUserAuth`, nginx hands that
+username to GLPI as `REMOTE_USER`, the server variable GLPI reads for
+[automatic authentication](https://help.glpi-project.org/documentation/modules/configuration/authentication/other).
+
+Any client can send any header, so nginx passes the username on only from a
+source it can trust, and PHP never sees the header itself. GLPI's
+documentation warns against reading the login from `HTTP_*` variables for
+this reason. The chart offers two checks, and at least one is required:
+
+| Setting | Check | Use when |
+|---------|-------|----------|
+| `allowFrom` | nginx [`allow`/`deny`](https://nginx.org/en/docs/http/ngx_http_access_module.html): only these addresses reach the application server, others get 403 | Every request from those addresses has passed the sign-in proxy, and the proxy replaces any username header the client sent |
+| `sharedKey` | The proxy adds a secret key header to each request. Without the right key nginx sends an empty `REMOTE_USER` | The proxy's address is shared with other traffic, for example a gateway that also serves routes without sign-in |
+
+With both set, a request must come from an allowed address, and only a
+request that also carries the key is signed in.
+
+What nginx does for each request to GLPI's front controller:
+
+- The username header and the key header are replaced by empty
+  [`fastcgi_param`](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_param)
+  values, so PHP cannot read either.
+- `REMOTE_USER` is the username when the check passed, empty otherwise. A
+  request without a valid key still reaches GLPI, as an anonymous visitor, so
+  the login form and local accounts keep working.
+- Header names with underscores are dropped by nginx by default
+  ([`underscores_in_headers`](https://nginx.org/en/docs/http/ngx_http_core_module.html#underscores_in_headers)),
+  so a client cannot slip the username in under a variant spelling.
+
+### Setting it up
+
+1. Create the key and its Secret. The key may hold letters, digits, `-` and
+   `_`, and needs at least 32 characters:
+
+   ```console
+   kubectl -n glpi create secret generic glpi-proxy-key \
+     --from-literal=key="$(openssl rand -hex 32)"
+   ```
+
+2. Configure the sign-in proxy to send the username in a header, replacing any
+   value the client sent, and to add the key header with the same key to
+   every request it forwards to GLPI.
+
+3. Set the values:
+
+   ```yaml
+   remoteUserAuth:
+     enabled: true
+     header: X-Forwarded-User     # the header your proxy sends
+     # allowFrom: [10.244.0.0/16] # optional: the proxy's addresses
+     sharedKey:
+       header: X-GLPI-Proxy-Key
+       existingSecret: glpi-proxy-key
+       secretKey: key
+   ```
+
+4. In GLPI, under Setup > Authentication > Other authentication methods,
+   enable automatic authentication with `REMOTE_USER` as the variable that
+   holds the login. GLPI then applies its usual rules: the account must
+   exist, or be created by one of GLPI's authentication sources.
+
+### How the key reaches nginx
+
+The key is read from the Secret into the nginx container's environment, never
+into a GLPI container. With `sharedKey` set, the chart mounts nginx's
+configuration as a template, and the
+[nginx image](https://hub.docker.com/_/nginx) ("Using environment variables in
+nginx configuration") renders it at start with `envsubst` into an `emptyDir`
+at `/etc/nginx/conf.d`, since the root filesystem is read-only.
+`NGINX_ENVSUBST_FILTER` limits the substitution to the key's variable, so
+nginx's own `$variables` are left alone. The key is compared in a
+[`map`](https://nginx.org/en/docs/http/ngx_http_map_module.html) with a
+case-sensitive regular expression (plain `map` strings match ignoring case),
+which is why the key is limited to letters, digits, `-` and `_`.
+
+Before nginx starts, a check in its container stops it if the key is empty,
+`REPLACE_ME`, shorter than 32 characters or holds other characters, so the
+pod never becomes ready. `kubectl logs <pod> -c nginx` shows the reason.
+
+To change the key, update the Secret, then restart the pod
+(`kubectl -n glpi rollout restart deployment/<release>-glpi`). nginx reads the
+key only at start.
+
+### Notes
+
+- `helm test` runs from its own pod. With `allowFrom` set, its requests get
+  403 unless its address is in the list. Add the pod network, or set
+  `tests.enabled: false`.
+- When a user signs out of GLPI, the sign-in proxy may sign them straight
+  back in. Send them to the proxy's own sign-out page to end both sessions.
+- The kubelet probes use the separate health port and are not affected.
+
 ## Restricting access
 
 The chart doesn't add access control in front of GLPI. To limit who can reach

@@ -9,7 +9,7 @@ LOCAL_TAG   ?= glpi:dev
 
 .PHONY: version image lint docs docs-check scan \
         test test-unit test-schema test-scripts lint-files \
-        test-image test-all
+        test-image test-nginx test-all
 
 version:            ## Print the GLPI version from Chart.yaml
 > @echo $(VERSION)
@@ -40,6 +40,9 @@ test-schema:        ## Validate rendered scenarios with kubeconform
 test-image: image   ## Build the image and run its contract tests
 > IMAGE=$(LOCAL_TAG) tests/image-test.sh
 
+test-nginx:         ## Run the rendered nginx config in the nginx image next to php-fpm (docker)
+> tests/nginx-test.sh
+
 test-scripts:       ## Release-report script tests + ruff (pip install -r requirements-dev.txt)
 > python3 -m pytest -q
 > ruff check scripts tests/scripts
@@ -52,4 +55,4 @@ scan: image         ## The release gates, locally: fixable High+ findings (Grype
 > grype --config .grype-ignore.yaml --only-fixed --fail-on high $(LOCAL_TAG)
 > trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $(LOCAL_TAG)
 
-test-all: test lint-files test-scripts test-image   ## Everything
+test-all: test lint-files test-scripts test-nginx test-image   ## Everything

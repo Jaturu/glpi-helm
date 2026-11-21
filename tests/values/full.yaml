@@ -13,6 +13,8 @@ glpi:
       valueFrom: { secretKeyRef: { name: ldap, key: password } }
   extraEnvFrom:
     - secretRef: { name: extra }
+  extraVolumes: [{ name: ca, secret: { secretName: corp-ca } }]
+  extraVolumeMounts: [{ name: ca, mountPath: /etc/glpi/ca, readOnly: true }]
 php:
   extraIni: |
     memory_limit = 512M
@@ -36,3 +38,17 @@ mariadb:
 imagePullSecrets: [{ name: regcred }]
 nodeSelector: { kubernetes.io/os: linux }
 tolerations: [{ key: dedicated, operator: Exists, effect: NoSchedule }]
+nginx:
+  extraEnvVars: [{ name: TZ, value: Europe/Paris }]
+  extraVolumes: [{ name: nginx-extra, configMap: { name: nginx-snippets } }]
+  extraVolumeMounts: [{ name: nginx-extra, mountPath: /etc/nginx/snippets, readOnly: true }]
+  extraServerConfig: |
+    location = /robots.txt { return 200 "User-agent: *\nDisallow: /\n"; }
+remoteUserAuth:
+  enabled: true
+  header: X-Forwarded-User
+  allowFrom: [10.244.0.0/16]
+  sharedKey:
+    header: X-GLPI-Proxy-Key
+    existingSecret: glpi-proxy-key
+    secretKey: key
