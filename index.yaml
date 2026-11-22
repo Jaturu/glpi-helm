@@ -3,6 +3,32 @@ entries:
   glpi:
   - apiVersion: v2
     appVersion: 12.0.2
+    created: "2026-11-22T00:33:15.658825709Z"
+    description: GLPI IT asset management and service desk on a non-root php-fpm image
+      with an nginx-unprivileged sidecar, optional built-in MariaDB (official image),
+      and Gateway API HTTPRoute support.
+    digest: d958c1297e25b881c02d74cd4fcd858181fe11354247c84c4355fef9fef3ae19
+    home: https://github.com/Jaturu/glpi-helm
+    keywords:
+    - glpi
+    - itsm
+    - helpdesk
+    - asset-management
+    - inventory
+    kubeVersion: '>=1.29.0-0'
+    maintainers:
+    - name: Jaturu
+      url: https://github.com/Jaturu
+    name: glpi
+    sources:
+    - https://github.com/Jaturu/glpi-helm
+    - https://github.com/glpi-project/glpi
+    type: application
+    urls:
+    - https://github.com/Jaturu/glpi-helm/releases/download/glpi-0.2.0/glpi-0.2.0.tgz
+    version: 0.2.0
+  - apiVersion: v2
+    appVersion: 12.0.2
     created: "2026-11-13T21:54:44.039401251Z"
     description: GLPI IT asset management and service desk on a non-root php-fpm image
       with an nginx-unprivileged sidecar, optional built-in MariaDB (official image),
@@ -27,4 +53,4 @@ entries:
     urls:
     - https://github.com/Jaturu/glpi-helm/releases/download/glpi-0.1.0/glpi-0.1.0.tgz
     version: 0.1.0
-generated: "2026-11-13T21:54:44.03940664Z"
+generated: "2026-11-22T00:33:15.658834522Z"
