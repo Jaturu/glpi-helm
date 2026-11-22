@@ -115,6 +115,8 @@ unchanged. GLPI honours them for the proxies listed in `glpi.trustedProxies`.
 | `public` | emptyDir | copy-assets | `/public` | rw (copy only) |
 | `app-tmp` / `nginx-tmp` | emptyDir | each container | `/tmp` | rw |
 | `nginx-conf` | ConfigMap | nginx | `/etc/nginx/conf.d` | ro |
+| `nginx-conf` | ConfigMap | nginx, with `remoteUserAuth.sharedKey` | `/etc/nginx/templates` | ro |
+| `nginx-conf-rendered` | emptyDir | nginx, with `remoteUserAuth.sharedKey` | `/etc/nginx/conf.d` | rw (written at start) |
 | `php-conf` | ConfigMap | glpi, cron, migrate | `/etc/glpi/php.d` | ro |
 | `glpi-conf` | ConfigMap | glpi, cron, migrate | `/var/www/glpi/config/local_define.php` | ro |
 
@@ -178,7 +180,10 @@ data volume, so a probe every ten seconds would leave thousands of them a day.
 | `glpi.trustedProxies`, `glpi.constants` | ConfigMap `<release>-glpi-config` (`local_define.php`) | GLPI constants |
 | `glpi.uploadLimitMB`, `glpi.timezone`, `php.extraIni` | ConfigMap `<release>-glpi-php` | PHP ini |
 | `glpi.uploadLimitMB`, ports | ConfigMap `<release>-glpi-nginx` | nginx |
-| `glpi.extraEnv` / `extraEnvFrom` | passed through | container env |
+| `glpi.extraEnv` / `extraEnvFrom` / `extraVolumeMounts` | passed through | glpi, cron, migrate |
+| `nginx.extraEnvVars` / `extraVolumeMounts` / `extraServerConfig` | passed through | nginx |
+| `glpi.extraVolumes`, `nginx.extraVolumes` | pod volumes | the containers that mount them |
+| `remoteUserAuth` | ConfigMap `<release>-glpi-nginx`, key Secret as nginx env | nginx sets `REMOTE_USER` (see [Exposure](exposure.md#sign-in-proxy)) |
 
 Everything else (mail, LDAP, entities, rules) is configured in the GLPI UI
 and stored in the database. Pods carry checksums of the three ConfigMaps, so

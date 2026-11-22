@@ -1,0 +1,232 @@
+suite: remoteUserAuth (sign-in from a trusted header)
+templates:
+  - deployment.yaml
+  - configmap-glpi.yaml
+  - configmap-nginx.yaml
+  - configmap-php.yaml
+release:
+  name: desk
+tests:
+  # ------------------------------------------------------------------- off
+  - it: leaves nginx untouched when off
+    set:
+      # Ignored while disabled.
+      remoteUserAuth.header: X-Forwarded-User
+      remoteUserAuth.allowFrom: [10.0.0.0/8]
+    asserts:
+      - template: configmap-nginx.yaml
+        notMatchRegex: { path: 'data["glpi.conf"]', pattern: 'REMOTE_USER|allow |map |HTTP_X_' }
+      - template: deployment.yaml
+        contains:
+          path: spec.template.spec.containers[?(@.name == "nginx")].volumeMounts
+          content: { name: nginx-conf, mountPath: /etc/nginx/conf.d, readOnly: true }
+      - template: deployment.yaml
+        notExists: { path: 'spec.template.spec.containers[?(@.name == "nginx")].command' }
+
+  # ------------------------------------------------------------ allowFrom
+  - it: with allowFrom only, allows the listed clients and passes the header as REMOTE_USER
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-Forwarded-User
+      remoteUserAuth.allowFrom: [10.244.0.0/16, 192.0.2.10, "2001:db8::/32"]
+    asserts:
+      - template: configmap-nginx.yaml
+        matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: '\n    allow 10\.244\.0\.0/16;\n    allow 192\.0\.2\.10;\n    allow 2001:db8::/32;\n    deny all;\n'
+      - template: configmap-nginx.yaml
+        matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: '\n        fastcgi_param HTTP_X_FORWARDED_USER "";\n(.*\n)?        fastcgi_param REMOTE_USER \$http_x_forwarded_user;\n'
+      - template: configmap-nginx.yaml
+        notMatchRegex: { path: 'data["glpi.conf"]', pattern: 'map |GLPI_REMOTE_USER_KEY' }
+      # The health server stays open to the kubelet.
+      - template: configmap-nginx.yaml
+        matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: '# Health server[^\n]*\nserver \{\n    listen 8081;\n    server_name _;\n    server_tokens off;\n    access_log off;\n\n    location'
+      # No key: plain conf.d mount, no startup check.
+      - template: deployment.yaml
+        notExists: { path: 'spec.template.spec.containers[?(@.name == "nginx")].command' }
+      - template: deployment.yaml
+        notExists: { path: 'spec.template.spec.containers[?(@.name == "nginx")].env' }
+
+  # ------------------------------------------------------------ sharedKey
+  - it: with sharedKey only, sets REMOTE_USER from a key-checked map and blanks both headers
+    set: &sharedKey
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-authentik-username
+      remoteUserAuth.sharedKey.header: X-GLPI-Proxy-Key
+      remoteUserAuth.sharedKey.existingSecret: glpi-proxy-key
+      remoteUserAuth.sharedKey.secretKey: key
+    asserts:
+      - template: configmap-nginx.yaml
+        matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'map \$http_x_glpi_proxy_key \$glpi_remote_user_key_ok \{\n    default 0;\n    "~\^\$\{GLPI_REMOTE_USER_KEY\}\$" 1;\n\}'
+      - template: configmap-nginx.yaml
+        matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'map \$glpi_remote_user_key_ok \$glpi_remote_user \{\n    default "";\n    1       \$http_x_authentik_username;\n\}'
+      - template: configmap-nginx.yaml
+        matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'fastcgi_param HTTP_X_AUTHENTIK_USERNAME "";\n        fastcgi_param HTTP_X_GLPI_PROXY_KEY "";\n(.*\n)?        fastcgi_param REMOTE_USER \$glpi_remote_user;\n'
+      - template: configmap-nginx.yaml
+        notMatchRegex: { path: 'data["glpi.conf"]', pattern: 'allow |deny all;\n    \n' }
+
+  - it: with sharedKey, reads the key from the Secret and renders the config as an nginx template
+    template: deployment.yaml
+    set: *sharedKey
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].env
+          value:
+            - name: GLPI_REMOTE_USER_KEY
+              valueFrom: { secretKeyRef: { name: glpi-proxy-key, key: key } }
+            - name: NGINX_ENVSUBST_FILTER
+              value: ^GLPI_REMOTE_USER_KEY$
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "nginx")].volumeMounts
+          content: { name: nginx-conf, mountPath: /etc/nginx/templates, readOnly: true }
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "nginx")].volumeMounts
+          content: { name: nginx-conf-rendered, mountPath: /etc/nginx/conf.d }
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nginx-conf
+            configMap:
+              name: desk-glpi-nginx
+              items: [{ key: glpi.conf, path: glpi.conf.template }]
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: nginx-conf-rendered, emptyDir: {} }
+      # The GLPI containers never get the key.
+      - notExists: { path: 'spec.template.spec.containers[?(@.name == "glpi")].env' }
+
+  - it: with sharedKey, checks the key before starting nginx through the image entrypoint
+    template: deployment.yaml
+    set: *sharedKey
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].command[0]
+          value: /bin/sh
+      - matchRegex:
+          path: spec.template.spec.containers[?(@.name == "nginx")].command[2]
+          pattern: 'REPLACE_ME\) fail'
+      - matchRegex:
+          path: spec.template.spec.containers[?(@.name == "nginx")].command[2]
+          pattern: '\[ "\$\{#key\}" -ge 32 \] \|\| fail'
+      - matchRegex:
+          path: spec.template.spec.containers[?(@.name == "nginx")].command[2]
+          pattern: "\nexec /docker-entrypoint.sh nginx -g 'daemon off;'\n?$"
+      # Kubernetes would expand $(NAME) in the script.
+      - notMatchRegex:
+          path: spec.template.spec.containers[?(@.name == "nginx")].command[2]
+          pattern: '\$\('
+
+  - it: keeps nginx.extraEnvVars after the key variables
+    template: deployment.yaml
+    set:
+      <<: *sharedKey
+      nginx.extraEnvVars: [{ name: TZ, value: UTC }]
+    asserts:
+      - lengthEqual: { path: 'spec.template.spec.containers[?(@.name == "nginx")].env', count: 3 }
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].env[2]
+          value: { name: TZ, value: UTC }
+
+  # ----------------------------------------------------------------- both
+  - it: with allowFrom and sharedKey, renders both checks
+    set:
+      <<: *sharedKey
+      remoteUserAuth.allowFrom: [10.244.0.0/16]
+    asserts:
+      - template: configmap-nginx.yaml
+        matchRegex: { path: 'data["glpi.conf"]', pattern: '\n    allow 10\.244\.0\.0/16;\n    deny all;\n' }
+      - template: configmap-nginx.yaml
+        matchRegex: { path: 'data["glpi.conf"]', pattern: 'fastcgi_param REMOTE_USER \$glpi_remote_user;' }
+      - template: deployment.yaml
+        exists: { path: 'spec.template.spec.containers[?(@.name == "nginx")].command' }
+
+  # ----------------------------------------------------------- validation
+  - it: fails without allowFrom or sharedKey
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-Forwarded-User
+    asserts:
+      - failedTemplate:
+          errorPattern: "remoteUserAuth needs allowFrom, sharedKey, or both"
+
+  - it: fails without a header name
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.allowFrom: [10.0.0.0/8]
+    asserts:
+      - failedTemplate:
+          errorPattern: "remoteUserAuth.header is required"
+
+  - it: rejects a header name with underscores (nginx drops such headers)
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X_Forwarded_User
+      remoteUserAuth.allowFrom: [10.0.0.0/8]
+    asserts:
+      - failedTemplate:
+          errorPattern: "remoteUserAuth.header is required"
+
+  - it: fails when the sharedKey Secret is missing
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-Forwarded-User
+      remoteUserAuth.sharedKey.header: X-GLPI-Proxy-Key
+      remoteUserAuth.sharedKey.secretKey: key
+    asserts:
+      - failedTemplate:
+          errorPattern: "remoteUserAuth.sharedKey needs header, existingSecret and secretKey together"
+
+  - it: fails when the sharedKey secretKey is missing
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-Forwarded-User
+      remoteUserAuth.sharedKey.header: X-GLPI-Proxy-Key
+      remoteUserAuth.sharedKey.existingSecret: glpi-proxy-key
+    asserts:
+      - failedTemplate:
+          errorPattern: "remoteUserAuth.sharedKey needs header, existingSecret and secretKey together"
+
+  - it: fails when the sharedKey header is missing
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-Forwarded-User
+      remoteUserAuth.sharedKey.existingSecret: glpi-proxy-key
+      remoteUserAuth.sharedKey.secretKey: key
+    asserts:
+      - failedTemplate:
+          errorPattern: "remoteUserAuth.sharedKey needs header, existingSecret and secretKey together"
+
+  - it: rejects the same header for the username and the key
+    template: deployment.yaml
+    set:
+      <<: *sharedKey
+      remoteUserAuth.sharedKey.header: x-authentik-USERNAME
+    asserts:
+      - failedTemplate:
+          errorPattern: "sharedKey.header must differ from remoteUserAuth.header"
+
+  - it: rejects an allowFrom entry that is not an address
+    template: deployment.yaml
+    set:
+      remoteUserAuth.enabled: true
+      remoteUserAuth.header: X-Forwarded-User
+      remoteUserAuth.allowFrom: ["10.0.0.0/8; allow all"]
+    asserts:
+      - failedTemplate:
+          errorPattern: "is not an IP address or CIDR"

@@ -1,6 +1,7 @@
 {{- include "glpi.validate" . }}
 {{- $fullname := include "glpi.fullname" . }}
 {{- $appImage := include "glpi.imageRef" (dict "image" .Values.image "default" .Chart.AppVersion) }}
+{{- $remoteUserKey := include "glpi.remoteUserAuth.keyEnabled" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -132,10 +133,33 @@ spec:
         - name: nginx
           image: {{ include "glpi.imageRef" (dict "image" .Values.nginx.image "default" "") }}
           imagePullPolicy: {{ .Values.nginx.image.pullPolicy }}
+          {{- if $remoteUserKey }}
+          # remoteUserAuth shared key: refuse to start with a weak or
+          # placeholder key, then hand over to the image's entrypoint, which
+          # renders /etc/nginx/templates into /etc/nginx/conf.d (envsubst).
+          command:
+            - /bin/sh
+            - -c
+            - |
+              {{- .Files.Get "files/check-remote-user-key.sh" | trim | nindent 14 }}
+              exec /docker-entrypoint.sh nginx -g 'daemon off;'
+          {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources.nginx | nindent 12 }}
+          {{- $nginxEnv := list }}
+          {{- if $remoteUserKey }}
+          {{- $nginxEnv = list
+                (dict "name" "GLPI_REMOTE_USER_KEY" "valueFrom" (dict "secretKeyRef" (dict
+                  "name" .Values.remoteUserAuth.sharedKey.existingSecret
+                  "key" .Values.remoteUserAuth.sharedKey.secretKey)))
+                (dict "name" "NGINX_ENVSUBST_FILTER" "value" "^GLPI_REMOTE_USER_KEY$") }}
+          {{- end }}
+          {{- with concat $nginxEnv .Values.nginx.extraEnvVars }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.nginx.port }}
@@ -162,8 +186,16 @@ spec:
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           volumeMounts:
             - { name: public, mountPath: /var/www/glpi/public, readOnly: true }
+            {{- if $remoteUserKey }}
+            - { name: nginx-conf, mountPath: /etc/nginx/templates, readOnly: true }
+            - { name: nginx-conf-rendered, mountPath: /etc/nginx/conf.d }
+            {{- else }}
             - { name: nginx-conf, mountPath: /etc/nginx/conf.d, readOnly: true }
+            {{- end }}
             - { name: nginx-tmp, mountPath: /tmp }
+            {{- with .Values.nginx.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
 
         {{- if .Values.cron.enabled }}
         # GLPI's automatic actions. The trap lets the loop stop at once on
@@ -206,12 +238,26 @@ spec:
         - name: nginx-conf
           configMap:
             name: {{ $fullname }}-nginx
+            {{- if $remoteUserKey }}
+            # Read as a template by the nginx image (*.template suffix).
+            items:
+              - { key: glpi.conf, path: glpi.conf.template }
+            {{- end }}
+        {{- if $remoteUserKey }}
+        # nginx's conf.d, written at start from the template above (the root
+        # filesystem is read-only).
+        - name: nginx-conf-rendered
+          emptyDir: {}
+        {{- end }}
         - name: php-conf
           configMap:
             name: {{ $fullname }}-php
         - name: glpi-conf
           configMap:
             name: {{ $fullname }}-config
+        {{- with concat .Values.glpi.extraVolumes .Values.nginx.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
