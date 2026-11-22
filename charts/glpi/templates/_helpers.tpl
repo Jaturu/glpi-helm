@@ -163,6 +163,56 @@ app.kubernetes.io/component: {{ .component }}
 {{- fail "externalDatabase.existingSecret is required when mariadb.enabled=false" -}}
 {{- end -}}
 {{- end -}}
+{{- include "glpi.validateRemoteUserAuth" . -}}
+{{- end }}
+
+{{- define "glpi.validateRemoteUserAuth" -}}
+{{- $ru := .Values.remoteUserAuth -}}
+{{- if $ru.enabled -}}
+{{- $headerRe := "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$" -}}
+{{- if not (regexMatch $headerRe (toString $ru.header)) -}}
+{{- fail "remoteUserAuth.header is required: a header name of letters, digits and dashes, e.g. X-Forwarded-User" -}}
+{{- end -}}
+{{- $sk := $ru.sharedKey -}}
+{{- $set := compact (list $sk.header $sk.existingSecret $sk.secretKey) -}}
+{{- if and $set (ne (len $set) 3) -}}
+{{- fail "remoteUserAuth.sharedKey needs header, existingSecret and secretKey together" -}}
+{{- end -}}
+{{- if $set -}}
+{{- if not (regexMatch $headerRe (toString $sk.header)) -}}
+{{- fail "remoteUserAuth.sharedKey.header must be a header name of letters, digits and dashes" -}}
+{{- end -}}
+{{- if eq (lower $sk.header) (lower $ru.header) -}}
+{{- fail "remoteUserAuth.sharedKey.header must differ from remoteUserAuth.header" -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or $ru.allowFrom $set) -}}
+{{- fail "remoteUserAuth needs allowFrom, sharedKey, or both: without them any client could choose its GLPI user" -}}
+{{- end -}}
+{{- range $ru.allowFrom -}}
+{{- if not (regexMatch "^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$" (toString .)) -}}
+{{- fail (printf "remoteUserAuth.allowFrom: %q is not an IP address or CIDR" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* ===================================================================
+     remoteUserAuth helpers
+     =================================================================== */}}
+
+{{/* True (non-empty) when the shared key check is configured. */}}
+{{- define "glpi.remoteUserAuth.keyEnabled" -}}
+{{- with .Values.remoteUserAuth -}}
+{{- if and .enabled .sharedKey.existingSecret -}}true{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/* Header name -> suffix of nginx's $http_ variable, e.g.
+     X-Forwarded-User -> x_forwarded_user. The FastCGI parameter PHP would
+     see is HTTP_ plus the upper-case form. */}}
+{{- define "glpi.headerVar" -}}
+{{- . | lower | replace "-" "_" -}}
 {{- end }}
 
 {{/* ===================================================================
@@ -209,4 +259,7 @@ volumeMounts:
   - { name: app-tmp, mountPath: /tmp }
   - { name: php-conf, mountPath: /etc/glpi/php.d, readOnly: true }
   - { name: glpi-conf, mountPath: /var/www/glpi/config/local_define.php, subPath: local_define.php, readOnly: true }
+{{- with .Values.glpi.extraVolumeMounts }}
+{{ toYaml . | indent 2 }}
+{{- end }}
 {{- end }}

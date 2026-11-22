@@ -1,3 +1,13 @@
+{{- $ru := .Values.remoteUserAuth }}
+{{- $key := include "glpi.remoteUserAuth.keyEnabled" . }}
+{{- $userVar := "" }}
+{{- $keyVar := "" }}
+{{- if $ru.enabled }}
+{{- $userVar = include "glpi.headerVar" $ru.header }}
+{{- end }}
+{{- if $key }}
+{{- $keyVar = include "glpi.headerVar" $ru.sharedKey.header }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,6 +16,23 @@ metadata:
     {{- include "glpi.labels" (dict "ctx" $ "component" "app") | nindent 4 }}
 data:
   glpi.conf: |
+    {{- if $key }}
+    # remoteUserAuth shared key. This file is an nginx image template:
+    # at container start, envsubst replaces ${GLPI_REMOTE_USER_KEY} with the
+    # key from the Secret and writes the result to /etc/nginx/conf.d. The
+    # regex match is case-sensitive (map matches plain strings ignoring case).
+    map $http_{{ $keyVar }} $glpi_remote_user_key_ok {
+        default 0;
+        "~^${GLPI_REMOTE_USER_KEY}$" 1;
+    }
+
+    # The username header counts only when the key matched.
+    map $glpi_remote_user_key_ok $glpi_remote_user {
+        default "";
+        1       $http_{{ $userVar }};
+    }
+    {{- "\n" }}
+    {{- end }}
     # Application server, exposed by the Service.
     server {
         listen {{ .Values.nginx.port }};
@@ -20,6 +47,14 @@ data:
 
         gzip on;
         gzip_types text/css application/javascript image/svg+xml application/json;
+        {{- if and $ru.enabled $ru.allowFrom }}
+
+        # remoteUserAuth.allowFrom: only the sign-in proxy may connect.
+        {{- range $ru.allowFrom }}
+        allow {{ . }};
+        {{- end }}
+        deny all;
+        {{- end }}
 
         # Dotfiles are denied, except the /.well-known/ routes GLPI answers.
         location ~ /\.(?!well-known/) { deny all; }
@@ -37,10 +72,28 @@ data:
             include fastcgi_params;
             fastcgi_param SCRIPT_FILENAME /var/www/glpi/public/index.php;
             fastcgi_param DOCUMENT_ROOT   /var/www/glpi/public;
+            {{- if $ru.enabled }}
+            # remoteUserAuth: PHP never sees the raw header{{ if $key }}s{{ end }}. Setting an
+            # HTTP_* parameter replaces the request header of the same name.
+            fastcgi_param HTTP_{{ upper $userVar }} "";
+            {{- if $key }}
+            fastcgi_param HTTP_{{ upper $keyVar }} "";
+            # The username, or empty when the key did not match.
+            fastcgi_param REMOTE_USER $glpi_remote_user;
+            {{- else }}
+            # Only allowFrom clients get here, so the header is trusted.
+            fastcgi_param REMOTE_USER $http_{{ $userVar }};
+            {{- end }}
+            {{- end }}
             fastcgi_read_timeout 600s;
             fastcgi_buffers 16 16k;
             fastcgi_buffer_size 32k;
         }
+        {{- with .Values.nginx.extraServerConfig }}
+
+        # nginx.extraServerConfig
+        {{- . | trim | nindent 8 }}
+        {{- end }}
     }
 
     # Health server: kubelet probes only, not exposed by the Service.

@@ -38,6 +38,18 @@ nginx:
     pullPolicy: IfNotPresent
   # -- Container port nginx listens on (unprivileged, >1024).
   port: 8080
+  # -- Extra env entries for the nginx container (full EnvVar objects).
+  extraEnvVars: []
+  # -- Extra pod volumes for nginx (full Volume objects). Mount them with
+  # nginx.extraVolumeMounts.
+  extraVolumes: []
+  # -- Extra volume mounts for the nginx container (full VolumeMount objects).
+  extraVolumeMounts: []
+  # -- nginx directives added at the end of the application server block (the
+  # one the Service exposes, not the health server), e.g.
+  # `location = /robots.txt { return 200 "User-agent: *\nDisallow: /\n"; }`.
+  # The rendered configuration must pass nginx -t, or nginx does not start.
+  extraServerConfig: ""
 
 ## =============================================================================
 ## GLPI application
@@ -87,6 +99,51 @@ glpi:
 
   # -- Extra envFrom sources (whole Secrets/ConfigMaps), applied likewise.
   extraEnvFrom: []
+
+  # -- Extra pod volumes for the GLPI containers (full Volume objects). Mount
+  # them with glpi.extraVolumeMounts.
+  extraVolumes: []
+
+  # -- Extra volume mounts (full VolumeMount objects), applied to the php-fpm,
+  # cron and migrate containers.
+  extraVolumeMounts: []
+
+## =============================================================================
+## Sign-in from a trusted header (REMOTE_USER)
+## =============================================================================
+
+## A sign-in proxy in front of GLPI (for example authentik, Authelia or
+## oauth2-proxy) authenticates the user and sends the username in a header.
+## nginx passes it to GLPI as REMOTE_USER, only for requests it can trust,
+## and PHP never sees the header itself. In GLPI, enable it under
+## Setup > Authentication > Other authentication methods, with REMOTE_USER as
+## the login field. Requests that fail the check reach GLPI anonymous, so the
+## local login form keeps working. Set allowFrom, sharedKey, or both.
+## See docs/exposure.md, "Sign-in proxy".
+remoteUserAuth:
+  # -- Pass a trusted username header to GLPI as REMOTE_USER.
+  enabled: false
+  # -- Request header that carries the username, e.g. X-authentik-username,
+  # Remote-User or X-Forwarded-User. Letters, digits and dashes only.
+  header: ""
+  # -- Only these client addresses (IPs or CIDRs, nginx allow) may reach the
+  # application server, every other client gets 403. List the proxy's
+  # addresses as nginx sees them. The `helm test` pod is denied too unless
+  # its address is listed. Empty = no address restriction.
+  allowFrom: []
+  ## Shared key: REMOTE_USER is set only when the request also carries this
+  ## key in sharedKey.header. Set all three keys or none.
+  sharedKey:
+    # -- Request header that carries the key, e.g. X-GLPI-Proxy-Key. Set
+    # header, existingSecret and secretKey together, or none of them.
+    header: ""
+    # -- Secret holding the key. nginx reads it at startup and refuses to
+    # start if it is empty, REPLACE_ME, shorter than 32 characters, or has
+    # characters other than letters, digits, - and _. Generate one with
+    # `openssl rand -hex 32`.
+    existingSecret: ""
+    # -- Key in sharedKey.existingSecret holding the key.
+    secretKey: ""
 
 ## =============================================================================
 ## PHP

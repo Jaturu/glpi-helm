@@ -1,0 +1,98 @@
+suite: extra hooks (env, volumes, mounts, nginx server config)
+templates:
+  - deployment.yaml
+  - configmap-glpi.yaml
+  - configmap-nginx.yaml
+  - configmap-php.yaml
+release:
+  name: desk
+tests:
+  - it: adds nothing by default
+    asserts:
+      - template: deployment.yaml
+        notExists: { path: 'spec.template.spec.containers[?(@.name == "nginx")].env' }
+      - template: deployment.yaml
+        notExists: { path: 'spec.template.spec.containers[?(@.name == "nginx")].command' }
+      - template: deployment.yaml
+        lengthEqual: { path: spec.template.spec.volumes, count: 7 }
+      - template: deployment.yaml
+        lengthEqual: { path: 'spec.template.spec.containers[?(@.name == "nginx")].volumeMounts', count: 3 }
+      - template: deployment.yaml
+        lengthEqual: { path: 'spec.template.spec.containers[?(@.name == "glpi")].volumeMounts', count: 4 }
+      - template: configmap-nginx.yaml
+        notMatchRegex: { path: 'data["glpi.conf"]', pattern: 'extraServerConfig' }
+
+  - it: adds nginx.extraEnvVars to the nginx container only
+    template: deployment.yaml
+    set:
+      nginx.extraEnvVars:
+        - { name: TZ, value: Europe/Paris }
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name == "nginx")].env
+          value:
+            - { name: TZ, value: Europe/Paris }
+      - notExists: { path: 'spec.template.spec.containers[?(@.name == "glpi")].env' }
+
+  - it: adds nginx.extraVolumes to the pod and nginx.extraVolumeMounts to nginx
+    template: deployment.yaml
+    set:
+      nginx.extraVolumes:
+        - { name: nginx-extra, configMap: { name: my-nginx-snippets } }
+      nginx.extraVolumeMounts:
+        - { name: nginx-extra, mountPath: /etc/nginx/snippets, readOnly: true }
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: nginx-extra, configMap: { name: my-nginx-snippets } }
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "nginx")].volumeMounts
+          content: { name: nginx-extra, mountPath: /etc/nginx/snippets, readOnly: true }
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "glpi")].volumeMounts
+          content: { name: nginx-extra, mountPath: /etc/nginx/snippets, readOnly: true }
+
+  - it: adds glpi.extraVolumes to the pod and glpi.extraVolumeMounts to php-fpm, cron and migrate
+    template: deployment.yaml
+    set:
+      glpi.extraVolumes:
+        - { name: ca, secret: { secretName: corp-ca } }
+      glpi.extraVolumeMounts:
+        - { name: ca, mountPath: /etc/glpi/ca, readOnly: true }
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content: { name: ca, secret: { secretName: corp-ca } }
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "glpi")].volumeMounts
+          content: &caMount { name: ca, mountPath: /etc/glpi/ca, readOnly: true }
+      - contains:
+          path: spec.template.spec.containers[?(@.name == "cron")].volumeMounts
+          content: *caMount
+      - contains:
+          path: spec.template.spec.initContainers[?(@.name == "migrate")].volumeMounts
+          content: *caMount
+      - notContains:
+          path: spec.template.spec.containers[?(@.name == "nginx")].volumeMounts
+          content: *caMount
+
+  - it: keeps both extraVolumes lists when both are set
+    template: deployment.yaml
+    set:
+      glpi.extraVolumes: [{ name: a, emptyDir: {} }]
+      nginx.extraVolumes: [{ name: b, emptyDir: {} }]
+    asserts:
+      - lengthEqual: { path: spec.template.spec.volumes, count: 9 }
+
+  - it: appends nginx.extraServerConfig inside the application server block
+    template: configmap-nginx.yaml
+    set:
+      nginx.extraServerConfig: |
+        location = /robots.txt {
+            return 200 "User-agent: *\nDisallow: /\n";
+        }
+    asserts:
+      # After the index.php location and before the health server.
+      - matchRegex:
+          path: 'data["glpi.conf"]'
+          pattern: 'fastcgi_buffer_size 32k;\n    }\n\n    # nginx.extraServerConfig\n    location = /robots.txt \{\n        return 200 [^\n]+\n    \}\n\}\n\n# Health server'

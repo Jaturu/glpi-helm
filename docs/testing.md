@@ -9,6 +9,7 @@ mistake.
 | Schema validation | `make test-schema` | helm, kubeconform | Rendered manifests are valid Kubernetes / Gateway API objects, across several values scenarios |
 | File lint | `make lint-files` | shellcheck, hadolint | Test scripts and the Dockerfile |
 | Report scripts | `make test-scripts` | python3, pytest, ruff | The release report and security status renderers |
+| nginx config | `make test-nginx` | helm, docker, python3 + PyYAML | The rendered nginx config passes `nginx -t` in the nginx image, and what PHP receives for each `remoteUserAuth` mode, including the startup key checks |
 | Image contract | `make test-image` | docker | The image provides what the chart relies on |
 | Vulnerability gates | `make scan` | docker, grype, trivy | The release gates (fixable High and Critical), against the local image |
 
@@ -82,6 +83,19 @@ that `bin/console` boots and GLPI's own requirements check passes, the data
 paths point at `/var/glpi`, `/etc/glpi/php.d` overrides PHP settings for CLI
 and fpm, ownership of writable vs read-only paths, that `public/` holds only
 the front controller as PHP, and that no build tools remain.
+
+## nginx config
+
+[`tests/nginx-test.sh`](../tests/nginx-test.sh) renders the chart's nginx
+ConfigMap for each `remoteUserAuth` mode and runs it in the nginx image the
+chart deploys, the way the pod does: non-root, read-only root filesystem, and
+for the shared key the image's envsubst templates rendered into a tmpfs. A
+php-fpm container shares its network namespace, with a stub `index.php` that
+reports `REMOTE_USER` and the `HTTP_X_*` parameters PHP receives. It checks
+`nginx -t`, `nginx.extraServerConfig`, that PHP never sees the username or key
+header, that a wrong, partial, wrong-case or repeated key leaves the request
+anonymous, and that nginx refuses to start on an empty, placeholder, short or
+malformed key.
 
 ## helm test
 
