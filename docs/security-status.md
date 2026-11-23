@@ -4,7 +4,7 @@ No fixable High or Critical findings. 5 High or Critical finding(s) have no fix 
 
 Release `12.0.2-2`, published as `ghcr.io/jaturu/glpi:12.0.2-2` and `ghcr.io/jaturu/glpi:latest`.
 Manifest list `sha256:1dd05705529e6e3861d8feb4531fd1b7d7b36cb713f0322fe34b9f6f9384605c`.
-Re-scanned 2026-11-22 17:28 UTC against a vulnerability database built 2026-11-22 06:19 UTC.
+Re-scanned 2026-11-23 20:18 UTC against a vulnerability database built 2026-11-23 06:28 UTC.
 
 This page is regenerated on a schedule from the CycloneDX SBOM attached to the published image, so it reflects what the scanners know now rather than what they knew at build time. It is generated output and is not signed. The per-release pages under Releases are the build-time snapshots and do not change. Counts are of distinct vulnerabilities: one reported by both scanners, or on several platforms, is counted once, at the higher severity either scanner gives.
 
